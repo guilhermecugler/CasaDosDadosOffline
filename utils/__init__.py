@@ -1,4 +1,5 @@
 from .get_cnpj_numbers import get_cnpj_numbers_sqlite
+from .get_cnpj_count import get_cnpj_count_sqlite
 from .get_cnpj_data import get_cnpj_data_sqlite
 from .get_cnae import get_cnaes
 from .get_cities import get_cities
