@@ -13,7 +13,9 @@ from PIL import Image
 from utils.get_cnae import get_cnaes
 from utils.get_cities import get_cities
 from utils.get_cnpj_numbers import get_cnpj_numbers_sqlite
-from utils.get_cnpj_data import get_cnpj_data_sqlite
+from utils.get_cnpj_data import get_cnpj_data_sqlite, get_all_cnpj_data_sqlite
+from utils.excel_utils import save_excel
+import pandas as pd
 from CTkScrollableDropdown import CTkScrollableDropdown
 
 global cancel
@@ -368,30 +370,14 @@ class App(ctk.CTk):
 
         def buscar():
             start_time = time.time()
-            self.progress_bar.configure(mode="determinate")
-            self.status_update("Iniciando pesquisa...")
+            self.progress_bar.configure(mode="indeterminate")
+            self.progress_bar.start()
+            self.status_update("Buscando dados...")
 
             try:
-                cnpjs = []
-                page_size = 1000
-                max_cnpjs = json_filters.get('max_cnpjs', None)
-                page = 1
-                while True:
-                    if cancel.is_set():
-                        break
-                    json_filters['page'] = page
-                    self.status_update(f"Realizando pesquisa, página {page}...")
-                    page_cnpjs = get_cnpj_numbers_sqlite(json_filters, self.progress_bar_update, self.status_update, cancel)
-                    if not page_cnpjs:
-                        break
-                    cnpjs.extend(page_cnpjs)
-                    if max_cnpjs and len(cnpjs) >= max_cnpjs:
-                        cnpjs = cnpjs[:max_cnpjs]
-                        break
-                    page += 1
-                    self.progress_bar_update(min(len(cnpjs) / (max_cnpjs or 10000), 1.0))
+                data = get_all_cnpj_data_sqlite(json_filters, self.status_update)
             except Exception as e:
-                self.status_update(f"Erro ao buscar CNPJs: {e}")
+                self.status_update(f"Erro ao buscar dados: {e}")
                 self.button_buscar_empresas.configure(state='normal')
                 self.button_cancelar.configure(state='disabled')
                 return
@@ -405,23 +391,25 @@ class App(ctk.CTk):
                 self.button_cancelar.configure(state='disabled')
                 return
 
-            self.status_update(f"Encontrados {len(cnpjs)} CNPJ(s), iniciando extração...")
-            self.progress_bar.configure(mode="indeterminate")
-            self.progress_bar.start()
-
+            max_cnpjs = json_filters.get('max_cnpjs')
+            if max_cnpjs is not None:
+                data = data[:max_cnpjs]
+            self.status_update(f"Salvando {len(data)} registro(s)...")
             file_name = self.file_entry_var.get()
-            quantidade_cnpj_salvo = get_cnpj_data_sqlite(cnpjs, file_name, self.status_update, cancel)
-
-            self.progress_bar.stop()
-            self.progress_bar.configure(mode="determinate")
+            df = pd.DataFrame(data)
+            if not df.empty:
+                if file_name.endswith('.xlsx'):
+                    save_excel(df, file_name)
+                else:
+                    df.to_csv(file_name, index=False, encoding='utf-8')
+            quantidade_salvo = len(df)
 
             self.button_buscar_empresas.configure(state='normal')
             self.button_cancelar.configure(state='disabled')
 
-            cnpjs.clear()
             tempo = "%s segundos" % int((time.time() - start_time))
             self.progress_bar.set(1)
-            self.status_update(f"Finalizado... salvos {quantidade_cnpj_salvo} CNPJ(s) em {tempo}")
+            self.status_update(f"Finalizado... salvos {quantidade_salvo} CNPJ(s) em {tempo}")
 
         start_thread(buscar)
 
