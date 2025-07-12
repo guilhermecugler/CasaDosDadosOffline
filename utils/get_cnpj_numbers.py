@@ -1,5 +1,5 @@
 import sqlite3
-import pandas as pd
+import time
 from threading import Event
 
 def get_cnpj_numbers_sqlite(json_filters, progress_callback, status_callback, cancel_event: Event):
@@ -11,6 +11,8 @@ def get_cnpj_numbers_sqlite(json_filters, progress_callback, status_callback, ca
     db_path = "dados-publicos/cnpj.db"  # Ajuste o caminho conforme necessário
     try:
         conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA synchronous = OFF")
         cursor = conn.cursor()
     except sqlite3.Error as e:
         status_callback(f"Erro ao conectar ao banco de dados: {e}")
@@ -52,11 +54,16 @@ def get_cnpj_numbers_sqlite(json_filters, progress_callback, status_callback, ca
     # Filtro: Município
     municipio = json_filters['query'].get('municipio', [])
     if municipio and municipio[0]:
-        cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio[0],))
-        codigo_municipio = cursor.fetchone()
-        if codigo_municipio:
+        municipio_value = municipio[0]
+        if str(municipio_value).isdigit():
             query_filters.append("e.municipio = ?")
-            params.append(codigo_municipio[0])
+            params.append(int(municipio_value))
+        else:
+            cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio_value,))
+            codigo_municipio = cursor.fetchone()
+            if codigo_municipio:
+                query_filters.append("e.municipio = ?")
+                params.append(codigo_municipio[0])
 
     # Filtro: CEP
     cep = json_filters['query'].get('cep', [])
@@ -122,10 +129,10 @@ def get_cnpj_numbers_sqlite(json_filters, progress_callback, status_callback, ca
     query += f" LIMIT {page_size} OFFSET {(page - 1) * page_size}"
 
     try:
-        status_callback(f"Consultando página {page}...")
-        cursor.execute(query, params)
-        cnpjs = [row[0] for row in cursor.fetchall()]
-        status_callback(f"Página {page} concluída: {len(cnpjs)} CNPJ(s) encontrados")
+        status_callback(f"Consultando página {page}..."); progress_callback(0.0); start_query = time.time();
+        cursor.execute(query, params); progress_callback(0.6)
+        cnpjs = [row[0] for row in cursor.fetchall()]; progress_callback(1.0); elapsed = time.time() - start_query
+        status_callback(f"Página {page} concluída: {len(cnpjs)} CNPJ(s) em {elapsed:.1f}s")
     except sqlite3.Error as e:
         status_callback(f"Erro na consulta SQL: {e}")
         cnpjs = []
