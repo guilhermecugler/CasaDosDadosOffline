@@ -52,11 +52,16 @@ def get_cnpj_numbers_sqlite(json_filters, progress_callback, status_callback, ca
     # Filtro: Município
     municipio = json_filters['query'].get('municipio', [])
     if municipio and municipio[0]:
-        cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio[0],))
-        codigo_municipio = cursor.fetchone()
-        if codigo_municipio:
+        municipio_value = municipio[0]
+        if str(municipio_value).isdigit():
             query_filters.append("e.municipio = ?")
-            params.append(codigo_municipio[0])
+            params.append(int(municipio_value))
+        else:
+            cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio_value,))
+            codigo_municipio = cursor.fetchone()
+            if codigo_municipio:
+                query_filters.append("e.municipio = ?")
+                params.append(codigo_municipio[0])
 
     # Filtro: CEP
     cep = json_filters['query'].get('cep', [])

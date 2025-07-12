@@ -14,4 +14,4 @@ def get_cnaes():
         return [['Todas Atividades'] + [c[0] for c in cnaes], [''] + [c[1] for c in cnaes]]
     except sqlite3.Error as e:
         print(f"Erro ao carregar CNAEs: {e}")
-        return [[], []]
+        return [['Todas Atividades'], ['']]
