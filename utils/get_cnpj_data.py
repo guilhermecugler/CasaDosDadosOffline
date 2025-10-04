@@ -241,7 +241,8 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
     # Busca no banco (limite de 10.000 registros)
     limit = 10001
     query += f" LIMIT {limit}"
-
+    print(f"Query: {query}")
+    print(f"Params: {params}")
     try:
         cursor.execute(query, params)
         rows = cursor.fetchall()
