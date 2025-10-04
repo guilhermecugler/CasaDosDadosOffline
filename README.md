@@ -23,7 +23,11 @@ Este projeto deixou de ser um scraper do site Casa dos Dados. Agora ele funciona
 
 ### Preparando a base de dados offline
 
-Para gerar e atualizar o banco sqlite usado pela aplicacao, utilize o projeto [`rictom/cnpj-sqlite`](https://github.com/rictom/cnpj-sqlite).
+Para gerar e atualizar o banco sqlite usado pela aplicacao voce tem duas opcoes:
+
+- **Atualizacao automatica (recomendada):** dentro do aplicativo clique no botao `Atualizar Base Offline`. O processo baixa aproximadamente 60 GB de dados diretamente do site da Receita Federal, converte tudo para `cnpj.db` e substitui automaticamente o arquivo na pasta `dados-publicos`. As pastas `dados-publicos` e `dados-publicos-zip` sao limpas antes do download, entao verifique se nao ha arquivos que deseje manter. Se a versao local ja estiver atualizada, o aplicativo apenas informa que nao ha novos dados.
+- **Processo manual via [`rictom/cnpj-sqlite`](https://github.com/rictom/cnpj-sqlite):** siga os passos abaixo se preferir controlar manualmente o download ou reutilizar uma base existente.
+
 
 1. Clone ou baixe o repositorio:
    ```
@@ -139,3 +143,4 @@ Se estiver contribuindo com o projeto, adicione seu nome de usuario do GitHub ao
 ## Licenca
 
 Este projeto esta sob licenca GNU General Public License v3.0. Veja [LICENCA](https://www.gnu.org/licenses/gpl-3.0.en.html) para mais detalhes.
+

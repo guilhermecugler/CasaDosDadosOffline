@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime
 import time
 from tkinter import filedialog as fd
+from tkinter import messagebox
 from threading import Thread, Event
 from PIL import Image
 from utils.get_cnae import get_cnaes
@@ -17,6 +18,7 @@ from utils.get_cnpj_data import get_cnpj_data_sqlite, get_all_cnpj_data_sqlite
 from utils.excel_utils import save_excel
 import pandas as pd
 from CTkScrollableDropdown import CTkScrollableDropdown
+from utils.database_updater import update_cnpj_database, DatabaseUpdateError, UpdateCancelled
 
 global cancel
 cancel = Event()
@@ -209,70 +211,122 @@ class App(ctk.CTk):
             self.status_update("Cancelado com sucesso!")
             return
 
-        self.width = 550
-        self.height = 650
+        self.width = 780
+        self.height = 720
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         x = int((screen_width / 2) - (self.width / 2))
         y = int((screen_height / 2) - (self.height / 2))
 
         self.title("Casa dos Dados")
-        self.geometry(f'{self.width}x{self.height}+{x}+{y-30}')
-        self.grid_columnconfigure((0, 1), weight=1)
-        self.grid_rowconfigure(2, weight=1)
-        self.resizable(width=False, height=False)
+        self.geometry(f'{self.width}x{self.height}+{x}+{y - 30}')
+        for column in range(4):
+            self.grid_columnconfigure(column, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         assets = os.path.join(os.path.dirname(__file__), "..", "assets")
         self.iconbitmap(os.path.join(assets, "icon.ico"))
+        self.update_cancel_event = Event()
+        self._update_in_progress = False
 
-        self.home_image = ctk.CTkImage(light_image=Image.open(os.path.join(assets, "logo_casa_dos_dados_light.png")),
-                                       dark_image=Image.open(os.path.join(assets, "logo_casa_dos_dados_dark.png")), size=(500, 56))
-        self.home_image_label = ctk.CTkLabel(self, text="", image=self.home_image)
-        self.home_image_label.grid(row=0, column=0, padx=10, pady=(30, 10), sticky="ew", columnspan=4)
+        header_frame = ctk.CTkFrame(self, fg_color="transparent")
+        header_frame.grid(row=0, column=0, padx=10, pady=(20, 10), sticky="ew", columnspan=4)
+        header_frame.grid_columnconfigure(0, weight=1)
+
+        self.home_image = ctk.CTkImage(
+            light_image=Image.open(os.path.join(assets, "logo_casa_dos_dados_light.png")),
+            dark_image=Image.open(os.path.join(assets, "logo_casa_dos_dados_dark.png")),
+            size=(500, 56),
+        )
+        self.home_image_label = ctk.CTkLabel(header_frame, text="", image=self.home_image)
+        self.home_image_label.grid(row=0, column=0, sticky="w")
+
+        self.button_update_database = ctk.CTkButton(
+            header_frame,
+            text="Atualizar Base Offline",
+            width=200,
+            command=self.button_update_database_callback,
+        )
+        self.button_update_database.grid(row=0, column=1, padx=(10, 0), sticky="e")
 
         self.filters_frame = FiltersFrame(self, "Filtros")
         self.filters_frame.grid(row=1, column=0, padx=10, pady=(10, 0), sticky="nsew", columnspan=4)
 
-        self.label_max_cnpjs = ctk.CTkLabel(self, text="Máximo de CNPJs")
-        self.label_max_cnpjs.grid(row=5, column=0, padx=(20, 0), pady=10, sticky="w")
+        controls_frame = ctk.CTkFrame(self, fg_color="transparent")
+        controls_frame.grid(row=2, column=0, padx=10, pady=(10, 10), sticky="ew", columnspan=4)
+        controls_frame.grid_columnconfigure(0, weight=0)
+        controls_frame.grid_columnconfigure(1, weight=0)
+        controls_frame.grid_columnconfigure(2, weight=1)
+        controls_frame.grid_columnconfigure(3, weight=0)
 
-        self.entry_max_cnpjs_var = ctk.IntVar()
-        self.entry_max_cnpjs_var.set(1000)
-        self.entry_max_cnpjs = ctk.CTkEntry(self, placeholder_text="1000", width=100, textvariable=self.entry_max_cnpjs_var)
-        self.entry_max_cnpjs.grid(row=5, column=0, padx=(120, 0), pady=10, sticky="w")
+        self.label_max_cnpjs = ctk.CTkLabel(controls_frame, text="Maximo de CNPJs")
+        self.label_max_cnpjs.grid(row=0, column=0, padx=(0, 10), pady=5, sticky="w")
 
-        self.button_buscar_empresas = ctk.CTkButton(self, text="Buscar Empresas", command=self.button_buscar_empresas_callback)
-        self.button_buscar_empresas.grid(row=5, column=1, padx=10, pady=10, sticky="ew", columnspan=2)
+        self.entry_max_cnpjs_var = ctk.IntVar(value=1000)
+        self.entry_max_cnpjs = ctk.CTkEntry(controls_frame, width=120, textvariable=self.entry_max_cnpjs_var)
+        self.entry_max_cnpjs.grid(row=0, column=1, padx=(0, 25), pady=5, sticky="w")
 
-        self.button_cancelar = ctk.CTkButton(self, text="Cancelar", command=self.button_cancelar_callback, state="disabled")
-        self.button_cancelar.grid(row=5, column=3, padx=10, pady=10, sticky="ew")
+        self.button_buscar_empresas = ctk.CTkButton(
+            controls_frame, text="Buscar Empresas", command=self.button_buscar_empresas_callback
+        )
+        self.button_buscar_empresas.grid(row=0, column=2, padx=(0, 10), pady=5, sticky="ew")
 
-        self.status = ctk.CTkLabel(self, text="Faça uma busca!")
-        self.status.grid(row=6, column=0, padx=0, pady=0, sticky="ew", columnspan=4)
+        self.button_cancelar = ctk.CTkButton(
+            controls_frame, text="Cancelar", command=self.button_cancelar_callback, state="disabled"
+        )
+        self.button_cancelar.grid(row=0, column=3, padx=(0, 0), pady=5, sticky="ew")
+
+        self.status = ctk.CTkLabel(self, text="Faca uma busca!")
+        self.status.grid(row=3, column=0, padx=10, pady=(0, 0), sticky="ew", columnspan=4)
 
         self.progress_bar = ctk.CTkProgressBar(self, orientation='horizontal')
-        self.progress_bar.grid(row=7, column=0, padx=10, pady=(5, 5), sticky="ew", columnspan=4)
+        self.progress_bar.grid(row=4, column=0, padx=10, pady=(5, 5), sticky="ew", columnspan=4)
         self.progress_bar.set(0)
 
-        self.label_file_type = ctk.CTkLabel(self, text="Tipo de arquivo:")
-        self.label_file_type.grid(row=8, column=1)
+        export_frame = ctk.CTkFrame(self, fg_color="transparent")
+        export_frame.grid(row=5, column=0, padx=10, pady=(10, 20), sticky="ew", columnspan=4)
+        export_frame.grid_columnconfigure(0, weight=0)
+        export_frame.grid_columnconfigure(1, weight=1)
+        export_frame.grid_columnconfigure(2, weight=0)
+
+        self.appearance_mode_menu = ctk.CTkOptionMenu(
+            export_frame, values=["Sistema", "Escuro", "Claro"], command=self.change_appearance_mode_event
+        )
+        self.appearance_mode_menu.grid(row=0, column=0, padx=(0, 20), pady=5, sticky="w")
+
+        file_type_frame = ctk.CTkFrame(export_frame, fg_color="transparent")
+        file_type_frame.grid(row=0, column=1, pady=5, sticky="w")
+        file_type_frame.grid_columnconfigure(0, weight=0)
+        file_type_frame.grid_columnconfigure(1, weight=0)
+        file_type_frame.grid_columnconfigure(2, weight=0)
+
+        self.label_file_type = ctk.CTkLabel(file_type_frame, text="Tipo de arquivo:")
+        self.label_file_type.grid(row=0, column=0, padx=(0, 10), sticky="w")
 
         self.file_type_var = ctk.StringVar(value='xlsx')
-        self.radio_xlsx = ctk.CTkRadioButton(self, text='Planilha', value='xlsx', variable=self.file_type_var, command=self.radiobutton_event, radiobutton_width=13, radiobutton_height=13)
-        self.radio_xlsx.grid(row=8, column=2, padx=0, pady=0, sticky="w")
+        self.radio_xlsx = ctk.CTkRadioButton(
+            file_type_frame, text='Planilha', value='xlsx', variable=self.file_type_var, command=self.radiobutton_event,
+            radiobutton_width=13, radiobutton_height=13
+        )
+        self.radio_xlsx.grid(row=0, column=1, padx=(0, 10), sticky="w")
 
-        self.radio_csv = ctk.CTkRadioButton(self, text='CSV', value='csv', variable=self.file_type_var, command=self.radiobutton_event, radiobutton_width=13, radiobutton_height=13)
-        self.radio_csv.grid(row=8, column=3, padx=0, pady=0, sticky="e")
+        self.radio_csv = ctk.CTkRadioButton(
+            file_type_frame, text='CSV', value='csv', variable=self.file_type_var, command=self.radiobutton_event,
+            radiobutton_width=13, radiobutton_height=13
+        )
+        self.radio_csv.grid(row=0, column=2, sticky="w")
 
         self.file_entry_var = ctk.Variable(value=f"{datetime.strftime(datetime.now(), '%d-%m-%Y %H-%M')}.{self.file_type_var.get()}")
-        self.file_entry = ctk.CTkEntry(self, textvariable=self.file_entry_var)
-        self.file_entry.grid(row=9, column=1, padx=10, pady=20, sticky="ew")
+        self.file_entry = ctk.CTkEntry(export_frame, textvariable=self.file_entry_var)
+        self.file_entry.grid(row=1, column=0, columnspan=2, padx=(0, 10), pady=(0, 0), sticky="ew")
 
-        self.button_select_folder = ctk.CTkButton(self, text="Selecionar Pasta", command=self.button_select_folder_callback)
-        self.button_select_folder.grid(row=9, column=2, padx=10, pady=10, sticky="ew", columnspan=2)
+        self.button_select_folder = ctk.CTkButton(
+            export_frame, text="Selecionar Pasta", command=self.button_select_folder_callback
+        )
+        self.button_select_folder.grid(row=1, column=2, padx=(10, 0), pady=(0, 0), sticky="ew")
 
-        self.appearance_mode_menu = ctk.CTkOptionMenu(self, values=["Sistema", "Escuro", "Claro"], command=self.change_appearance_mode_event)
-        self.appearance_mode_menu.grid(row=9, column=0, padx=10, pady=20, sticky="ws")
+        self.progress_bar.set(0)
+
 
     def get_save_folder(self):
         directory = fd.askdirectory(title='Selecionar pasta')
@@ -288,6 +342,74 @@ class App(ctk.CTk):
     def radiobutton_event(self):
         self.file_entry_var.set(f"{datetime.strftime(datetime.now(), '%d-%m-%Y %H-%M')}.{self.file_type_var.get()}")
 
+    def button_update_database_callback(self):
+        if self._update_in_progress:
+            return
+        if self.button_buscar_empresas.cget("state") == "disabled":
+            messagebox.showinfo(
+                "Atualizar banco offline",
+                "Finalize a consulta atual antes de iniciar a atualizacao do banco offline.",
+            )
+            return
+
+        confirm = messagebox.askyesno(
+            "Atualizar banco offline",
+            (
+                "Este processo baixa aproximadamente 60 GB de dados da Receita Federal e pode levar varias horas. "
+                "As pastas 'dados-publicos' e 'dados-publicos-zip' serao limpas antes do download. Deseja continuar?"
+            ),
+        )
+        if not confirm:
+            return
+
+        self._update_in_progress = True
+        self.update_cancel_event.clear()
+        self.button_update_database.configure(state="disabled")
+        self.button_buscar_empresas.configure(state="disabled")
+        self.button_cancelar.configure(state="disabled")
+        cancel.clear()
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+        self.status_update("Preparando atualizacao do banco offline...")
+        start_thread(self._run_database_update)
+
+    def _status_from_thread(self, message: str) -> None:
+        self.after(0, lambda: self.status_update(message))
+
+    def _progress_from_thread(self, value: float) -> None:
+        def _update():
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(value)
+
+        self.after(0, _update)
+
+    def _finalize_update_ui(self) -> None:
+        self.button_update_database.configure(state="normal")
+        self.button_buscar_empresas.configure(state="normal")
+        self.button_cancelar.configure(state="disabled")
+        self._update_in_progress = False
+
+    def _run_database_update(self) -> None:
+        try:
+            update_cnpj_database(
+                status_callback=self._status_from_thread,
+                progress_callback=self._progress_from_thread,
+                cancel_event=self.update_cancel_event,
+            )
+        except UpdateCancelled:
+            self._status_from_thread("Atualizacao cancelada.")
+            self._progress_from_thread(0.0)
+        except DatabaseUpdateError as exc:
+            self._status_from_thread(f"Erro na atualizacao: {exc}")
+            self._progress_from_thread(0.0)
+        except Exception as exc:
+            self._status_from_thread(f"Erro inesperado: {exc}")
+            self._progress_from_thread(0.0)
+        finally:
+            self.after(0, self._finalize_update_ui)
+
+
     def progress_bar_update(self, step):
         self.progress_bar.set(step)
         self.update_idletasks()
@@ -302,10 +424,12 @@ class App(ctk.CTk):
         self.status_update("Cancelando, aguarde...")
         if cancel.is_set():
             self.button_buscar_empresas.configure(state='normal')
+            self.button_update_database.configure(state='normal')
             return
 
     def button_buscar_empresas_callback(self):
         self.button_buscar_empresas.configure(state='disabled')
+        self.button_update_database.configure(state='disabled')
         self.button_cancelar.configure(state='normal')
         cancel.clear()
 
@@ -323,6 +447,7 @@ class App(ctk.CTk):
                 if not municipio_codigo:
                     self.status_update(f"Erro: Município '{municipio_name}' não encontrado no banco de dados.")
                     self.button_buscar_empresas.configure(state='normal')
+                    self.button_update_database.configure(state='normal')
                     self.button_cancelar.configure(state='disabled')
                     return
 
@@ -363,6 +488,7 @@ class App(ctk.CTk):
             print(f'Error: {e}')
             self.status_update(f"Erro nos filtros: {e}")
             self.button_buscar_empresas.configure(state='normal')
+            self.button_update_database.configure(state='normal')
             self.button_cancelar.configure(state='disabled')
             return
 
@@ -379,6 +505,7 @@ class App(ctk.CTk):
             except Exception as e:
                 self.status_update(f"Erro ao buscar dados: {e}")
                 self.button_buscar_empresas.configure(state='normal')
+                self.button_update_database.configure(state='normal')
                 self.button_cancelar.configure(state='disabled')
                 return
 
@@ -388,6 +515,7 @@ class App(ctk.CTk):
             if cancel.is_set():
                 self.status_update("Cancelado com sucesso!")
                 self.button_buscar_empresas.configure(state='normal')
+                self.button_update_database.configure(state='normal')
                 self.button_cancelar.configure(state='disabled')
                 return
 
@@ -405,6 +533,7 @@ class App(ctk.CTk):
             quantidade_salvo = len(df)
 
             self.button_buscar_empresas.configure(state='normal')
+            self.button_update_database.configure(state='normal')
             self.button_cancelar.configure(state='disabled')
 
             tempo = "%s segundos" % int((time.time() - start_time))
