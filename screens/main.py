@@ -69,9 +69,9 @@ class FiltersFrame(ctk.CTkFrame):
         self.check_excluir_mei_var = ctk.BooleanVar(value=False)
         self.check_com_telefone_var = ctk.BooleanVar(value=True)
         self.check_somente_fixo_var = ctk.BooleanVar(value=False)
-        self.check_somente_matriz_var = ctk.BooleanVar(value=True)
-        self.check_somente_filial_var = ctk.BooleanVar(value=True)
-        self.check_somente_celular_var = ctk.BooleanVar(value=True)
+        self.check_somente_matriz_var = ctk.BooleanVar(value=False)
+        self.check_somente_filial_var = ctk.BooleanVar(value=False)
+        self.check_somente_celular_var = ctk.BooleanVar(value=False)
         self.check_com_email_var = ctk.BooleanVar(value=True)
         self.check_atividade_secundaria_var = ctk.BooleanVar(value=True)
         self.combobox_estados_var = ctk.StringVar(value='Todos Estados')
@@ -380,7 +380,22 @@ class App(ctk.CTk):
     def _progress_from_thread(self, value: float) -> None:
         def _update():
             self.progress_bar.configure(mode="determinate")
-            self.progress_bar.set(value)
+            self.progress_bar.set(max(0.0, min(value, 1.0)))
+
+        self.after(0, _update)
+
+    def _search_progress_from_thread(self, value: float) -> None:
+        def _update():
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(max(0.0, min(value, 1.0)))
+
+        self.after(0, _update)
+
+    def _restore_search_buttons(self) -> None:
+        def _update():
+            self.button_buscar_empresas.configure(state='normal')
+            self.button_update_database.configure(state='normal')
+            self.button_cancelar.configure(state='disabled')
 
         self.after(0, _update)
 
@@ -422,123 +437,165 @@ class App(ctk.CTk):
         cancel.set()
         self.button_cancelar.configure(state='disabled')
         self.status_update("Cancelando, aguarde...")
-        if cancel.is_set():
-            self.button_buscar_empresas.configure(state='normal')
-            self.button_update_database.configure(state='normal')
-            return
 
     def button_buscar_empresas_callback(self):
         self.button_buscar_empresas.configure(state='disabled')
         self.button_update_database.configure(state='disabled')
         self.button_cancelar.configure(state='normal')
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
         cancel.clear()
 
-        json_filters = {}
+        limit_text = ''
         try:
-            max_cnpjs = self.entry_max_cnpjs_var.get()
-            if max_cnpjs < 1:
-                max_cnpjs = None
+            limit_text = self.entry_max_cnpjs.get().strip()
+        except AttributeError:  # fallback para uso do IntVar em versões mais antigas
+            limit_text = str(self.entry_max_cnpjs_var.get()).strip()
 
-            # Get municipio codigo instead of name
-            municipio_name = self.filters_frame.combobox_municipios_var.get()
-            municipio_codigo = None
-            if municipio_name != 'Todos Municipios':
-                municipio_codigo = get_municipio_codigo(municipio_name)
-                if not municipio_codigo:
-                    self.status_update(f"Erro: Município '{municipio_name}' não encontrado no banco de dados.")
-                    self.button_buscar_empresas.configure(state='normal')
-                    self.button_update_database.configure(state='normal')
-                    self.button_cancelar.configure(state='disabled')
-                    return
+        max_cnpjs = None
+        if limit_text:
+            try:
+                value = int(limit_text)
+                if value > 0:
+                    max_cnpjs = value
+            except ValueError:
+                self.status_update("Informe um numero valido para o limite de CNPJs.")
+                self._restore_search_buttons()
+                return
 
-            json_filters.update(
-                {
-                    'query': {
-                        'termo': [] if not self.filters_frame.entry_termo.get() else [self.filters_frame.entry_termo.get()],
-                        'atividade_principal': [] if not self.filters_frame.cnae_code_var.get() else [self.filters_frame.cnae_code_var.get()],
-                        'natureza_juridica': [],
-                        'uf': [] if self.filters_frame.combobox_estados_var.get() == 'Todos Estados' else [self.filters_frame.combobox_estados_var.get()],
-                        'municipio': [] if municipio_codigo is None else [str(municipio_codigo)],  # Use codigo instead of name
-                        'cep': [] if not self.filters_frame.entry_CEP.get() else [self.filters_frame.entry_CEP.get()],
-                        'ddd': [] if not self.filters_frame.entry_DDD.get() else [self.filters_frame.entry_DDD.get()],
-                        'bairro': [] if not self.filters_frame.entry_bairro.get() else [self.filters_frame.entry_bairro.get()],
-                    },
-                    'range_query': {
-                        'data_abertura': {
-                            'lte': None if not self.filters_frame.entry_data_final.get() else datetime.strftime(datetime.strptime(self.filters_frame.entry_data_final.get(), '%d/%m/%Y'), '%Y-%m-%d'),
-                            'gte': None if not self.filters_frame.entry_data_inicial.get() else datetime.strftime(datetime.strptime(self.filters_frame.entry_data_inicial.get(), '%d/%m/%Y'), '%Y-%m-%d'),
-                        }
-                    },
-                    'extras': {
-                        'somente_mei': self.filters_frame.check_somente_mei_var.get(),
-                        'excluir_mei': self.filters_frame.check_excluir_mei_var.get(),
-                        'com_email': self.filters_frame.check_com_email_var.get(),
-                        'incluir_atividade_secundaria': self.filters_frame.check_atividade_secundaria_var.get(),
-                        'com_contato_telefonico': self.filters_frame.check_com_telefone_var.get(),
-                        'somente_fixo': self.filters_frame.check_somente_fixo_var.get(),
-                        'somente_celular': self.filters_frame.check_somente_celular_var.get(),
-                        'somente_matriz': self.filters_frame.check_somente_matriz_var.get(),
-                        'somente_filial': self.filters_frame.check_somente_filial_var.get()
-                    },
-                    'max_cnpjs': max_cnpjs,
-                    'page': 1
-                })
-
-        except ValueError as e:
-            print(f'Error: {e}')
-            self.status_update(f"Erro nos filtros: {e}")
-            self.button_buscar_empresas.configure(state='normal')
-            self.button_update_database.configure(state='normal')
-            self.button_cancelar.configure(state='disabled')
+        filtros = self.filters_frame
+        somente_mei = filtros.check_somente_mei_var.get()
+        excluir_mei = filtros.check_excluir_mei_var.get()
+        if somente_mei and excluir_mei:
+            self.status_update("Escolha apenas uma opcao entre 'Somente MEI' e 'Excluir MEI'.")
+            self._restore_search_buttons()
             return
 
-        self.progress_bar.set(0)
+        somente_fixo = filtros.check_somente_fixo_var.get()
+        somente_celular = filtros.check_somente_celular_var.get()
+        if somente_fixo and somente_celular:
+            self.status_update("Escolha apenas uma opcao de telefone (Fixo ou Celular).")
+            self._restore_search_buttons()
+            return
+
+        somente_matriz = filtros.check_somente_matriz_var.get()
+        somente_filial = filtros.check_somente_filial_var.get()
+        if somente_matriz and somente_filial:
+            self.status_update("Escolha apenas Matriz ou Filial.")
+            self._restore_search_buttons()
+            return
+
+        com_contato = filtros.check_com_telefone_var.get() or somente_fixo or somente_celular
+
+        municipio_name = filtros.combobox_municipios_var.get()
+        municipio_codigo = None
+        if municipio_name != 'Todos Municipios':
+            municipio_codigo = get_municipio_codigo(municipio_name)
+            if not municipio_codigo:
+                self.status_update(f"Erro: Municipio '{municipio_name}' nao encontrado no banco de dados.")
+                self._restore_search_buttons()
+                return
+
+        try:
+            data_inicial_input = filtros.entry_data_inicial.get().strip()
+            data_final_input = filtros.entry_data_final.get().strip()
+            data_inicial_fmt = datetime.strftime(datetime.strptime(data_inicial_input, '%d/%m/%Y'), '%Y-%m-%d') if data_inicial_input else None
+            data_final_fmt = datetime.strftime(datetime.strptime(data_final_input, '%d/%m/%Y'), '%Y-%m-%d') if data_final_input else None
+        except ValueError as exc:
+            self.status_update(f"Erro nos filtros: {exc}")
+            self._restore_search_buttons()
+            return
+
+        termo = filtros.entry_termo.get().strip()
+        cep_raw = filtros.entry_CEP.get().strip()
+        cep_digits = ''.join(ch for ch in cep_raw if ch.isdigit())
+        ddd_text = filtros.entry_DDD.get().strip()
+        bairro_text = filtros.entry_bairro.get().strip()
+
+        extras = {
+            'somente_mei': somente_mei,
+            'excluir_mei': excluir_mei,
+            'com_email': filtros.check_com_email_var.get(),
+            'incluir_atividade_secundaria': filtros.check_atividade_secundaria_var.get(),
+            'com_contato_telefonico': com_contato,
+            'somente_fixo': somente_fixo,
+            'somente_celular': somente_celular,
+            'somente_matriz': somente_matriz,
+            'somente_filial': somente_filial,
+        }
+
+        json_filters = {
+            'query': {
+                'termo': [termo] if termo else [],
+                'atividade_principal': [filtros.cnae_code_var.get()] if filtros.cnae_code_var.get() else [],
+                'natureza_juridica': [],
+                'uf': [] if filtros.combobox_estados_var.get() == 'Todos Estados' else [filtros.combobox_estados_var.get()],
+                'municipio': [] if municipio_codigo is None else [str(municipio_codigo)],
+                'cep': [cep_digits] if cep_digits else [],
+                'ddd': [ddd_text] if ddd_text else [],
+                'bairro': [bairro_text] if bairro_text else [],
+            },
+            'range_query': {
+                'data_abertura': {
+                    'lte': data_final_fmt,
+                    'gte': data_inicial_fmt,
+                }
+            },
+            'extras': extras,
+            'max_cnpjs': max_cnpjs,
+        }
+
+        self.status_update("Buscando dados no banco local...")
+        self._search_progress_from_thread(0.02)
 
         def buscar():
             start_time = time.time()
-            self.progress_bar.configure(mode="indeterminate")
-            self.progress_bar.start()
-            self.status_update("Buscando dados...")
-
             try:
-                data = get_all_cnpj_data_sqlite(json_filters, self.status_update)
-            except Exception as e:
-                self.status_update(f"Erro ao buscar dados: {e}")
-                self.button_buscar_empresas.configure(state='normal')
-                self.button_update_database.configure(state='normal')
-                self.button_cancelar.configure(state='disabled')
-                return
+                self._search_progress_from_thread(0.05)
+                data = get_all_cnpj_data_sqlite(
+                    json_filters,
+                    self.status_update,
+                    progress_callback=self._search_progress_from_thread,
+                    cancel_event=cancel,
+                    limit_hint=max_cnpjs,
+                )
 
-            self.progress_bar.stop()
-            self.progress_bar.configure(mode="determinate")
+                if cancel.is_set():
+                    self.status_update("Cancelado com sucesso!")
+                    self._search_progress_from_thread(0.0)
+                    return
 
-            if cancel.is_set():
-                self.status_update("Cancelado com sucesso!")
-                self.button_buscar_empresas.configure(state='normal')
-                self.button_update_database.configure(state='normal')
-                self.button_cancelar.configure(state='disabled')
-                return
+                registros = len(data)
+                if max_cnpjs is not None and registros > max_cnpjs:
+                    data = data[:max_cnpjs]
+                    registros = len(data)
 
-            max_cnpjs = json_filters.get('max_cnpjs')
-            if max_cnpjs is not None:
-                data = data[:max_cnpjs]
-            self.status_update(f"Salvando {len(data)} registro(s)...")
-            file_name = self.file_entry_var.get()
-            df = pd.DataFrame(data)
-            if not df.empty:
-                if file_name.endswith('.xlsx'):
-                    save_excel(df, file_name)
+                self.status_update(f"Encontrados {registros} registro(s).")
+
+                file_name = self.file_entry_var.get()
+                if data:
+                    df = pd.DataFrame(data)
+                    self._search_progress_from_thread(0.9)
+                    try:
+                        if file_name.endswith('.xlsx'):
+                            save_excel(df, file_name)
+                        else:
+                            df.to_csv(file_name, index=False, encoding='utf-8')
+                        elapsed = int(time.time() - start_time)
+                        self._search_progress_from_thread(1.0)
+                        self.status_update(f"Finalizado... salvos {registros} CNPJ(s) em {elapsed} segundos")
+                    except Exception as exc:
+                        self._search_progress_from_thread(1.0)
+                        self.status_update(f"Erro ao salvar arquivo: {exc}")
                 else:
-                    df.to_csv(file_name, index=False, encoding='utf-8')
-            quantidade_salvo = len(df)
-
-            self.button_buscar_empresas.configure(state='normal')
-            self.button_update_database.configure(state='normal')
-            self.button_cancelar.configure(state='disabled')
-
-            tempo = "%s segundos" % int((time.time() - start_time))
-            self.progress_bar.set(1)
-            self.status_update(f"Finalizado... salvos {quantidade_salvo} CNPJ(s) em {tempo}")
+                    self._search_progress_from_thread(1.0)
+                    self.status_update("Nenhum dado para salvar")
+            except Exception as exc:
+                self._search_progress_from_thread(0.0)
+                self.status_update(f"Erro ao buscar dados: {exc}")
+            finally:
+                cancel.clear()
+                self._restore_search_buttons()
 
         start_thread(buscar)
 

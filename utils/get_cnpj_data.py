@@ -79,37 +79,25 @@ def get_cnpj_data_sqlite(cnpjs, file_name, status_callback, cancel_event: Event)
     return len(df)
 
 
-def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
-    """Busca dados completos de CNPJs com filtros avançados.
+def get_all_cnpj_data_sqlite(
+    json_filters,
+    status_callback,
+    fields=None,
+    progress_callback=None,
+    cancel_event=None,
+    limit_hint=None,
+):
+    """Busca dados completos de CNPJs com filtros avançados."""
 
-    Parameters
-    ----------
-    json_filters : dict
-        Dicionário de filtros conforme o formato utilizado no projeto.
-    status_callback : Callable[[str], None]
-        Função chamada para relatar o status da consulta.
-    fields : list[str], optional
-        Lista opcional de campos a serem retornados. Quando ``None`` todos os
-        campos padrão são utilizados.
-
-    Returns
-    -------
-    list[dict]
-        Lista de dicionários com os dados encontrados (no máximo 10.000
-        registros). Caso existam mais resultados, é enviado um aviso via
-        ``status_callback``.
-
-    Example
-    -------
-    >>> data = get_all_cnpj_data_sqlite(json_filters, print)
-    >>> print(len(data))
-    """
+    if cancel_event is None:
+        cancel_event = Event()
 
     db_path = "dados-publicos/cnpj.db"
     try:
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA temp_store = MEMORY")
         conn.execute("PRAGMA synchronous = OFF")
+        conn.execute("PRAGMA query_only = 1")
         cursor = conn.cursor()
     except sqlite3.Error as e:
         status_callback(f"Erro ao conectar ao banco de dados: {e}")
@@ -148,16 +136,14 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
     WHERE e.situacao_cadastral = '02'
     """
 
-    params = []
-    query_filters = []
+    params: list = []
+    query_filters: list[str] = []
 
-    # Termo de busca
     termo = json_filters.get('query', {}).get('termo', [])
     if termo and termo[0]:
         query_filters.append("(emp.razao_social LIKE ? OR e.nome_fantasia LIKE ?)")
         params.extend([f"%{termo[0]}%", f"%{termo[0]}%"])
 
-    # Atividade principal (CNAE)
     atividade_principal = json_filters.get('query', {}).get('atividade_principal', [])
     if atividade_principal and atividade_principal[0]:
         if json_filters.get('extras', {}).get('incluir_atividade_secundaria', False):
@@ -167,13 +153,11 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
             query_filters.append("e.cnae_fiscal = ?")
             params.append(atividade_principal[0])
 
-    # UF
     uf = json_filters.get('query', {}).get('uf', [])
     if uf and uf[0]:
         query_filters.append("e.uf = ?")
         params.append(uf[0])
 
-    # Municipio
     municipio = json_filters.get('query', {}).get('municipio', [])
     if municipio and municipio[0]:
         municipio_value = municipio[0]
@@ -181,31 +165,27 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
             query_filters.append("e.municipio = ?")
             params.append(int(municipio_value))
         else:
-            cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio_value,))
+            cursor.execute("SELECT codigo FROM municipio WHERE descricao = ?", (municipio_value.upper(),))
             codigo_municipio = cursor.fetchone()
             if codigo_municipio:
                 query_filters.append("e.municipio = ?")
                 params.append(codigo_municipio[0])
 
-    # CEP
     cep = json_filters.get('query', {}).get('cep', [])
     if cep and cep[0]:
         query_filters.append("e.cep = ?")
         params.append(cep[0].replace('-', ''))
 
-    # DDD
     ddd = json_filters.get('query', {}).get('ddd', [])
     if ddd and ddd[0]:
         query_filters.append("(e.ddd1 = ? OR e.ddd2 = ?)")
         params.extend([ddd[0], ddd[0]])
 
-    # Bairro
     bairro = json_filters.get('query', {}).get('bairro', [])
     if bairro and bairro[0]:
         query_filters.append("e.bairro LIKE ?")
         params.append(f"%{bairro[0]}%")
 
-    # Data de abertura
     data_abertura = json_filters.get('range_query', {}).get('data_abertura', {})
     gte = data_abertura.get('gte')
     lte = data_abertura.get('lte')
@@ -216,8 +196,8 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
         query_filters.append("e.data_inicio_atividades <= ?")
         params.append(lte.replace('-', ''))
 
-    # Extras
     extras = json_filters.get('extras', {})
+    telefone_filter = "((e.telefone1 IS NOT NULL AND e.telefone1 != '') OR (e.telefone2 IS NOT NULL AND e.telefone2 != ''))"
     if extras.get('somente_mei'):
         query_filters.append("s.opcao_mei = 'S'")
     if extras.get('excluir_mei'):
@@ -225,11 +205,17 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
     if extras.get('com_email'):
         query_filters.append("e.correio_eletronico IS NOT NULL AND e.correio_eletronico != ''")
     if extras.get('com_contato_telefonico'):
-        query_filters.append("(e.telefone1 IS NOT NULL OR e.telefone2 IS NOT NULL)")
+        query_filters.append(telefone_filter)
     if extras.get('somente_fixo'):
-        query_filters.append("e.ddd1 IN ('11', '12', '13', '14', '15', '16', '17', '18', '19', '21', '22', '24', '27', '28', '31', '32', '33', '34', '35', '37', '38', '41', '42', '43', '44', '45', '46', '47', '48', '49', '51', '53', '54', '55', '61', '62', '63', '64', '65', '66', '67', '68', '69', '71', '73', '74', '75', '77', '79', '81', '82', '83', '84', '85', '86', '87', '88', '89', '91', '92', '93', '94', '95', '96', '97', '98', '99')")
+        query_filters.append(
+            "((e.telefone1 IS NOT NULL AND e.telefone1 != '' AND substr(e.telefone1, 1, 1) IN ('2','3','4','5')) "
+            "OR (e.telefone2 IS NOT NULL AND e.telefone2 != '' AND substr(e.telefone2, 1, 1) IN ('2','3','4','5')))"
+        )
     if extras.get('somente_celular'):
-        query_filters.append("e.ddd1 NOT IN ('11', '12', '13', '14', '15', '16', '17', '18', '19', '21', '22', '24', '27', '28', '31', '32', '33', '34', '35', '37', '38', '41', '42', '43', '44', '45', '46', '47', '48', '49', '51', '53', '54', '55', '61', '62', '63', '64', '65', '66', '67', '68', '69', '71', '73', '74', '75', '77', '79', '81', '82', '83', '84', '85', '86', '87', '88', '89', '91', '92', '93', '94', '95', '96', '97', '98', '99')")
+        query_filters.append(
+            "((e.telefone1 IS NOT NULL AND e.telefone1 != '' AND substr(e.telefone1, 1, 1) = '9') "
+            "OR (e.telefone2 IS NOT NULL AND e.telefone2 != '' AND substr(e.telefone2, 1, 1) = '9'))"
+        )
     if extras.get('somente_matriz'):
         query_filters.append("e.matriz_filial = '1'")
     if extras.get('somente_filial'):
@@ -238,24 +224,60 @@ def get_all_cnpj_data_sqlite(json_filters, status_callback, fields=None):
     if query_filters:
         query += " AND " + " AND ".join(query_filters)
 
-    # Busca no banco (limite de 10.000 registros)
-    limit = 10001
-    query += f" LIMIT {limit}"
-    print(f"Query: {query}")
-    print(f"Params: {params}")
+    max_rows = 10000
+    if limit_hint:
+        try:
+            limit_val = int(limit_hint)
+            if limit_val > 0:
+                max_rows = limit_val
+        except (TypeError, ValueError):
+            pass
+    fetch_limit = max_rows + 1
+
+    query += " ORDER BY e.cnpj LIMIT ?"
+    params.append(fetch_limit)
+
     try:
         cursor.execute(query, params)
-        rows = cursor.fetchall()
     except sqlite3.Error as e:
         status_callback(f"Erro na consulta SQL: {e}")
         conn.close()
         return []
-    finally:
-        conn.close()
 
-    if len(rows) == limit:
-        status_callback("Resultado truncado em 10.000 registros")
-        rows = rows[:10000]
+    results = []
+    total_fetched = 0
+    chunk_size = 1000
+    cancelled = False
+    if progress_callback:
+        progress_callback(0.1)
 
-    results = [dict(zip(selected_fields, row)) for row in rows]
-    return results
+    while True:
+        chunk = cursor.fetchmany(chunk_size)
+        if not chunk:
+            break
+        results.extend(chunk)
+        total_fetched += len(chunk)
+        if progress_callback and max_rows:
+            fetch_ratio = min(total_fetched / max_rows, 1.0)
+            progress_callback(0.1 + 0.6 * fetch_ratio)
+        if cancel_event.is_set():
+            cancelled = True
+            break
+        if total_fetched >= fetch_limit:
+            break
+
+    conn.close()
+
+    if cancelled:
+        status_callback("Busca cancelada pelo usuario.")
+        return []
+
+    if len(results) >= fetch_limit:
+        status_callback(f"Resultado truncado em {max_rows} registros")
+        results = results[:max_rows]
+
+    if progress_callback:
+        progress_callback(0.75)
+
+    formatted = [dict(zip(selected_fields, row)) for row in results]
+    return formatted
