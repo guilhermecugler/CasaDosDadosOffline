@@ -1,5 +1,5 @@
 # Casa dos Dados Offline
-![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https://github.com/guilhermecugler/Scraper-Casa-dos-Dados&title=View%20Count)
+![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https://github.com/guilhermecugler/CasaDosDadosOffline&title=View%20Count)
 
 ![GitHub repo size](https://img.shields.io/github/repo-size/guilhermecugler/Scraper-Casa-dos-Dados?style=for-the-badge)
 ![GitHub language count](https://img.shields.io/github/languages/count/guilhermecugler/Scraper-Casa-dos-Dados?style=for-the-badge)
@@ -76,8 +76,8 @@ Antes de comecar, verifique se voce atende aos seguintes requisitos:
 
 Para instalar, siga estas etapas:
 
-- Visite a pagina de [releases](https://github.com/guilhermecugler/Scraper-Casa-dos-Dados/releases/) do repositorio.
-- Baixe a versao mais [recente](https://github.com/guilhermecugler/Scraper-Casa-dos-Dados/releases/latest).
+- Visite a pagina de [releases](https://github.com/guilhermecugler/CasaDosDadosOffline/releases/) do repositorio.
+- Baixe a versao mais [recente](https://github.com/guilhermecugler/CasaDosDadosOffline/releases/latest).
 - Escolha entre a versao portavel ou a instalavel (esta inicia mais rapido).
 - Execute e utilize normalmente. Certifique-se de ter o `cnpj.db` na pasta `dados-publicos` antes da primeira abertura.
 
@@ -86,7 +86,7 @@ Para instalar, siga estas etapas:
 Windows:
 ```
 1. Clone este repositorio:
-   git clone https://github.com/guilhermecugler/Scraper-Casa-dos-Dados.git
+   git clone https://github.com/guilhermecugler/CasaDosDadosOffline.git
 
 2. Navegue ate a pasta clonada
 
