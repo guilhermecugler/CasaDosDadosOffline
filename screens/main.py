@@ -249,6 +249,17 @@ class App(ctk.CTk):
         )
         self.button_update_database.grid(row=0, column=1, padx=(10, 0), sticky="e")
 
+        source_row = ctk.CTkFrame(header_frame, fg_color="transparent")
+        source_row.grid(row=1, column=0, columnspan=2, padx=0, pady=(6, 0), sticky="w")
+        ctk.CTkLabel(source_row, text="Fonte de download:").grid(row=0, column=0, padx=(0, 8), sticky="w")
+        self.source_var = ctk.StringVar(value="Auto")
+        self.source_selector = ctk.CTkSegmentedButton(
+            source_row,
+            values=["Auto", "Receita Federal", "Espelho"],
+            variable=self.source_var,
+        )
+        self.source_selector.grid(row=0, column=1, sticky="w")
+
         self.filters_frame = FiltersFrame(self, "Filtros")
         self.filters_frame.grid(row=1, column=0, padx=10, pady=(10, 0), sticky="nsew", columnspan=4)
 
@@ -352,10 +363,11 @@ class App(ctk.CTk):
             )
             return
 
+        fonte = self.source_var.get()
         confirm = messagebox.askyesno(
             "Atualizar banco offline",
             (
-                "Este processo baixa aproximadamente 60 GB de dados da Receita Federal e pode levar varias horas. "
+                f"Este processo baixa aproximadamente 60 GB de dados (fonte: {fonte}) e pode levar varias horas. "
                 "As pastas 'dados-publicos' e 'dados-publicos-zip' serao limpas antes do download. Deseja continuar?"
             ),
         )
@@ -367,6 +379,7 @@ class App(ctk.CTk):
         self.button_update_database.configure(state="disabled")
         self.button_buscar_empresas.configure(state="disabled")
         self.button_cancelar.configure(state="disabled")
+        self.source_selector.configure(state="disabled")
         cancel.clear()
         self.progress_bar.stop()
         self.progress_bar.configure(mode="determinate")
@@ -403,14 +416,18 @@ class App(ctk.CTk):
         self.button_update_database.configure(state="normal")
         self.button_buscar_empresas.configure(state="normal")
         self.button_cancelar.configure(state="disabled")
+        self.source_selector.configure(state="normal")
         self._update_in_progress = False
 
     def _run_database_update(self) -> None:
+        source_map = {"Auto": "auto", "Receita Federal": "receita", "Espelho": "mirror"}
+        source = source_map.get(self.source_var.get(), "auto")
         try:
             update_cnpj_database(
                 status_callback=self._status_from_thread,
                 progress_callback=self._progress_from_thread,
                 cancel_event=self.update_cancel_event,
+                source=source,
             )
         except UpdateCancelled:
             self._status_from_thread("Atualizacao cancelada.")

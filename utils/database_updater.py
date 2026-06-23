@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
@@ -153,11 +154,39 @@ SIMPLES_SUFFIXES = (".simples.csv", ".simples")
 __all__ = ["update_cnpj_database", "DatabaseUpdateError", "UpdateCancelled"]
 
 
+def _fmt_speed(bps: float) -> str:
+    if bps >= 1024 ** 2:
+        return f"{bps / 1024 ** 2:.1f} MB/s"
+    if bps >= 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps:.0f} B/s"
+
+
+def _fmt_size(b: int) -> str:
+    if b >= 1024 ** 3:
+        return f"{b / 1024 ** 3:.1f} GB"
+    if b >= 1024 ** 2:
+        return f"{b / 1024 ** 2:.1f} MB"
+    if b >= 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b} B"
+
+
+def _fmt_eta(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
 def update_cnpj_database(
     status_callback: StatusCallback,
     progress_callback: ProgressCallback = None,
     cancel_event: Optional[Event] = None,
     cleanup: bool = False,
+    source: str = "auto",
 ) -> Path:
     """Download Receita Federal data and rebuild the sqlite database."""
 
@@ -172,7 +201,7 @@ def update_cnpj_database(
     progress = ProgressReporter(progress_callback)
 
     try:
-        reference, remote_modified, remote_files = _fetch_remote_dataset_info(status_callback)
+        reference, remote_modified, remote_files = _fetch_remote_dataset_info(status_callback, source)
         local_reference = _get_local_reference_date(db_path)
 
         if local_reference is not None:
@@ -349,7 +378,19 @@ def _parse_dav_entries(xml_text: str) -> List[Tuple[str, bool, Optional[datetime
 
 def _fetch_remote_dataset_info(
     status_callback: Optional[StatusCallback] = None,
+    source: str = "auto",
 ) -> Tuple[str, Optional[datetime], List[Tuple[str, str]]]:
+    if source == "mirror":
+        reference_full, modified = _fetch_latest_mirror_reference()
+        files = _fetch_mirror_files(reference_full)
+        return "-".join(reference_full.split("-")[:2]), modified, files
+
+    if source == "receita":
+        reference, modified = _fetch_latest_remote_reference()
+        files = _fetch_dataset_files(reference)
+        return reference, modified, files
+
+    # auto: tenta RF primeiro, cai no espelho se falhar
     try:
         reference, modified = _fetch_latest_remote_reference()
         files = _fetch_dataset_files(reference)
@@ -360,8 +401,7 @@ def _fetch_remote_dataset_info(
         try:
             reference_full, modified = _fetch_latest_mirror_reference()
             files = _fetch_mirror_files(reference_full)
-            reference = "-".join(reference_full.split("-")[:2])
-            return reference, modified, files
+            return "-".join(reference_full.split("-")[:2]), modified, files
         except (requests.RequestException, DatabaseUpdateError) as mirror_exc:
             raise DatabaseUpdateError(
                 f"Falha ao acessar a Receita Federal ({primary_exc}) "
@@ -502,14 +542,20 @@ def _download_remote_files(
             status_callback(f"Baixando {name} ({index}/{total})...")
 
         if not reuse_existing:
-            _stream_download(url, local_path, cancel_event)
+            _stream_download(url, local_path, cancel_event, status_callback, f"{name} ({index}/{total})")
 
         downloaded.append((name, local_path))
         progress.increment()
     return downloaded
 
 
-def _stream_download(url: str, destination: Path, cancel_event: Optional[Event]) -> None:
+def _stream_download(
+    url: str,
+    destination: Path,
+    cancel_event: Optional[Event],
+    status_callback: Optional[StatusCallback] = None,
+    file_label: str = "",
+) -> None:
     temporary = destination.with_suffix(destination.suffix + ".part")
     if temporary.exists():
         temporary.unlink()
@@ -517,11 +563,35 @@ def _stream_download(url: str, destination: Path, cancel_event: Optional[Event])
     try:
         with requests.get(url, headers=HTTP_HEADERS, stream=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as response:
             response.raise_for_status()
+            raw_cl = response.headers.get("Content-Length", "")
+            content_length: Optional[int] = int(raw_cl) if raw_cl.isdigit() else None
+            downloaded_bytes = 0
+            start_time = time.monotonic()
+            last_report = start_time
+
             with open(temporary, "wb") as handler:
                 for chunk in response.iter_content(STREAM_CHUNK):
                     _check_cancel(cancel_event)
-                    if chunk:
-                        handler.write(chunk)
+                    if not chunk:
+                        continue
+                    handler.write(chunk)
+                    downloaded_bytes += len(chunk)
+
+                    now = time.monotonic()
+                    if status_callback and file_label and (now - last_report) >= 0.5:
+                        elapsed = now - start_time
+                        speed = downloaded_bytes / elapsed if elapsed > 0 else 0
+                        parts = [f"Baixando {file_label}"]
+                        if speed > 0:
+                            parts.append(_fmt_speed(speed))
+                        if content_length:
+                            parts.append(f"{_fmt_size(downloaded_bytes)} / {_fmt_size(content_length)}")
+                            remaining = content_length - downloaded_bytes
+                            if speed > 0 and remaining > 0:
+                                parts.append(f"ETA {_fmt_eta(remaining / speed)}")
+                        status_callback(" | ".join(parts))
+                        last_report = now
+
         os.replace(temporary, destination)
     except Exception:
         if temporary.exists():
