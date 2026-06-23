@@ -5,26 +5,31 @@ import os
 import re
 import shutil
 import sqlite3
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from threading import Event
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 
-BASE_URL = "https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/"
+SHARE_TOKEN = "YggdBLfdninEJX9"
+DAV_BASE_URL = f"https://arquivos.receitafederal.gov.br/public.php/dav/files/{SHARE_TOKEN}"
+MIRROR_BASE_URL = "https://dados-abertos-rf-cnpj.casadosdados.com.br/arquivos/"
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CasaDosDadosOffline/1.0",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+DAV_NAMESPACES = {"d": "DAV:"}
 
 CONNECT_TIMEOUT = 20
 READ_TIMEOUT = 120
 STREAM_CHUNK = 4 * 1024 * 1024
 CSV_CHUNK_ROWS = 100000
+
+REFERENCE_FILENAME = ".receita_reference"
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Optional[Callable[[float], None]]
@@ -152,7 +157,7 @@ def update_cnpj_database(
     status_callback: StatusCallback,
     progress_callback: ProgressCallback = None,
     cancel_event: Optional[Event] = None,
-    cleanup: bool = True,
+    cleanup: bool = False,
 ) -> Path:
     """Download Receita Federal data and rebuild the sqlite database."""
 
@@ -167,7 +172,7 @@ def update_cnpj_database(
     progress = ProgressReporter(progress_callback)
 
     try:
-        reference, remote_modified, remote_files = _fetch_remote_dataset_info()
+        reference, remote_modified, remote_files = _fetch_remote_dataset_info(status_callback)
         local_reference = _get_local_reference_date(db_path)
 
         if local_reference is not None:
@@ -188,10 +193,19 @@ def update_cnpj_database(
         progress.set_total(len(remote_files) + conversion_steps)
 
         status_callback(f"Atualizando base de dados ({reference})...")
-        _prepare_directory(zip_dir)
+        expected_suffixes = _build_expected_suffix_map(categories)
+        stored_reference = _read_zip_reference(zip_dir)
+        skip_existing_downloads = stored_reference in (None, reference)
+        _remove_partial_downloads(zip_dir)
 
         downloaded = _download_remote_files(
-            remote_files, zip_dir, status_callback, progress, cancel_event
+            remote_files,
+            zip_dir,
+            status_callback,
+            progress,
+            cancel_event,
+            skip_existing=skip_existing_downloads,
+            expected_suffixes=expected_suffixes,
         )
         db_path = _build_sqlite_database(
             downloaded,
@@ -205,6 +219,8 @@ def update_cnpj_database(
 
         if cleanup:
             _prepare_directory(zip_dir)
+        else:
+            _write_zip_reference(zip_dir, reference)
 
         progress.complete()
         status_callback("Banco atualizado com sucesso!")
@@ -228,62 +244,179 @@ def _prepare_directory(directory: Path) -> None:
             shutil.rmtree(entry)
 
 
-def _fetch_remote_dataset_info() -> Tuple[str, Optional[datetime], List[Tuple[str, str]]]:
-    reference, modified = _fetch_latest_remote_reference()
-    files = _fetch_dataset_files(reference)
-    return reference, modified, files
+
+def _remove_partial_downloads(directory: Path) -> None:
+    for entry in directory.glob('*.part'):
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+
+
+def _read_zip_reference(zip_dir: Path) -> Optional[str]:
+    reference_path = zip_dir / REFERENCE_FILENAME
+    if not reference_path.exists():
+        return None
+    try:
+        value = reference_path.read_text(encoding='utf-8').strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _write_zip_reference(zip_dir: Path, reference: str) -> None:
+    reference_path = zip_dir / REFERENCE_FILENAME
+    try:
+        reference_path.write_text(reference, encoding='utf-8')
+    except OSError:
+        return
+
+
+def _build_expected_suffix_map(categories: Dict[str, object]) -> Dict[str, Tuple[str, ...]]:
+    mapping: Dict[str, Tuple[str, ...]] = {}
+
+    for name in categories.get('empresas', []):
+        mapping[str(name).lower()] = EMPRESAS_SUFFIXES
+    for name in categories.get('estabelecimentos', []):
+        mapping[str(name).lower()] = ESTABELECIMENTO_SUFFIXES
+    for name in categories.get('socios', []):
+        mapping[str(name).lower()] = SOCIOS_SUFFIXES
+    for name in categories.get('simples', []):
+        mapping[str(name).lower()] = SIMPLES_SUFFIXES
+
+    code_tables: Dict[str, Optional[str]] = categories.get('code_tables', {})  # type: ignore[assignment]
+    if isinstance(code_tables, dict):
+        for config in CODE_TABLES:
+            zip_name = code_tables.get(config['table'])
+            if zip_name:
+                mapping[str(zip_name).lower()] = config['suffixes']
+    return mapping
+
+
+def _zip_has_expected_content(path: Path, suffixes: Optional[Tuple[str, ...]]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        if path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if suffixes:
+                try:
+                    _resolve_csv_member(archive, suffixes)
+                except DatabaseUpdateError:
+                    return False
+        return True
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _propfind(url: str, depth: str = "1") -> requests.Response:
+    response = requests.request(
+        "PROPFIND",
+        url,
+        headers={**HTTP_HEADERS, "Depth": depth, "Content-Type": "application/xml"},
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+    )
+    response.raise_for_status()
+    return response
+
+
+def _parse_dav_entries(xml_text: str) -> List[Tuple[str, bool, Optional[datetime]]]:
+    """Return list of (name, is_collection, last_modified) from a PROPFIND response."""
+    root = ET.fromstring(xml_text)
+    entries: List[Tuple[str, bool, Optional[datetime]]] = []
+    for resp in root.findall("d:response", DAV_NAMESPACES):
+        href = resp.findtext("d:href", default="", namespaces=DAV_NAMESPACES)
+        name = href.rstrip("/").rsplit("/", 1)[-1]
+        if not name:
+            continue
+        is_col = resp.find("d:propstat/d:prop/d:resourcetype/d:collection", DAV_NAMESPACES) is not None
+        lm_raw = resp.findtext("d:propstat/d:prop/d:getlastmodified", default="", namespaces=DAV_NAMESPACES)
+        last_modified: Optional[datetime] = None
+        if lm_raw:
+            try:
+                last_modified = parsedate_to_datetime(lm_raw).replace(tzinfo=None)
+            except Exception:
+                pass
+        entries.append((name, is_col, last_modified))
+    return entries
+
+
+def _fetch_remote_dataset_info(
+    status_callback: Optional[StatusCallback] = None,
+) -> Tuple[str, Optional[datetime], List[Tuple[str, str]]]:
+    try:
+        reference, modified = _fetch_latest_remote_reference()
+        files = _fetch_dataset_files(reference)
+        return reference, modified, files
+    except (requests.RequestException, DatabaseUpdateError) as primary_exc:
+        if status_callback:
+            status_callback("Receita Federal inacessivel, usando espelho Casa dos Dados...")
+        try:
+            reference_full, modified = _fetch_latest_mirror_reference()
+            files = _fetch_mirror_files(reference_full)
+            reference = "-".join(reference_full.split("-")[:2])
+            return reference, modified, files
+        except (requests.RequestException, DatabaseUpdateError) as mirror_exc:
+            raise DatabaseUpdateError(
+                f"Falha ao acessar a Receita Federal ({primary_exc}) "
+                f"e o espelho Casa dos Dados ({mirror_exc})."
+            ) from mirror_exc
+
+
+def _fetch_latest_mirror_reference() -> Tuple[str, Optional[datetime]]:
+    response = requests.get(
+        MIRROR_BASE_URL, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
+    )
+    response.raise_for_status()
+    folders = re.findall(r'href="(\d{4}-\d{2}-\d{2}/)"', response.text)
+    if not folders:
+        raise DatabaseUpdateError(
+            "Nao foi possivel identificar a ultima versao no espelho Casa dos Dados."
+        )
+    folders.sort(reverse=True)
+    return folders[0].rstrip("/"), None
+
+
+def _fetch_mirror_files(reference: str) -> List[Tuple[str, str]]:
+    url = f"{MIRROR_BASE_URL}{reference}/"
+    response = requests.get(url, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+    response.raise_for_status()
+    names = re.findall(r'href="([^"]+\.zip)"', response.text, re.IGNORECASE)
+    if not names:
+        raise DatabaseUpdateError(f"Nenhum arquivo zip encontrado no espelho ({reference}).")
+    files = [(name, f"{url}{name}") for name in names]
+    files.sort(key=lambda item: item[0].lower())
+    return files
 
 
 def _fetch_latest_remote_reference() -> Tuple[str, Optional[datetime]]:
-    listing = requests.get(
-        f"{BASE_URL}?C=M;O=D", headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
-    )
-    listing.raise_for_status()
-    soup = BeautifulSoup(listing.text, "html.parser")
-    pattern = re.compile(r"^\d{4}-\d{2}/$")
-    for row in soup.find_all("tr"):
-        link = row.find("a")
-        if not link:
-            continue
-        href = link.get("href", "")
-        if not pattern.match(href):
-            continue
-        reference = href.strip("/")
-        last_modified = None
-        cells = row.find_all("td")
-        if len(cells) >= 3:
-            raw = cells[2].get_text(strip=True)
-            if raw:
-                try:
-                    last_modified = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-                except ValueError:
-                    last_modified = None
-        return reference, last_modified
-    raise DatabaseUpdateError(
-        "Nao foi possivel identificar a ultima versao da base na Receita Federal."
-    )
+    response = _propfind(f"{DAV_BASE_URL}/")
+    entries = _parse_dav_entries(response.text)
+    folder_pattern = re.compile(r"^\d{4}-\d{2}$")
+    folders = [(name, lm) for name, is_col, lm in entries if is_col and folder_pattern.match(name)]
+    if not folders:
+        raise DatabaseUpdateError(
+            "Nao foi possivel identificar a ultima versao da base na Receita Federal."
+        )
+    folders.sort(key=lambda x: x[0], reverse=True)
+    return folders[0]
 
 
 def _fetch_dataset_files(reference: str) -> List[Tuple[str, str]]:
-    normalized = reference.strip("/")
-    dataset_url = f"{BASE_URL}{normalized}/"
-    dataset_listing = requests.get(
-        dataset_url, headers=HTTP_HEADERS, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
-    )
-    dataset_listing.raise_for_status()
-    soup = BeautifulSoup(dataset_listing.text, "html.parser")
-
+    response = _propfind(f"{DAV_BASE_URL}/{reference}/")
+    entries = _parse_dav_entries(response.text)
     files: List[Tuple[str, str]] = []
-    for link in soup.find_all("a"):
-        href = link.get("href")
-        if not href or not href.lower().endswith(".zip"):
-            continue
-        url = href if href.startswith("http") else dataset_url + href
-        files.append((href, url))
-
+    for name, is_col, _ in entries:
+        if not is_col and name.lower().endswith(".zip"):
+            files.append((name, f"{DAV_BASE_URL}/{reference}/{name}"))
     if not files:
-        raise DatabaseUpdateError(f"Nenhum arquivo zip encontrado em {dataset_url}.")
-
+        raise DatabaseUpdateError(f"Nenhum arquivo zip encontrado em {reference}.")
     files.sort(key=lambda item: item[0].lower())
     return files
 
@@ -348,14 +481,29 @@ def _download_remote_files(
     status_callback: StatusCallback,
     progress: ProgressReporter,
     cancel_event: Optional[Event],
+    skip_existing: bool,
+    expected_suffixes: Optional[Dict[str, Tuple[str, ...]]] = None,
 ) -> List[Tuple[str, Path]]:
     downloaded: List[Tuple[str, Path]] = []
     total = len(remote_files)
     for index, (name, url) in enumerate(remote_files, start=1):
         _check_cancel(cancel_event)
-        status_callback(f"Baixando {name} ({index}/{total})...")
         local_path = destination / name
-        _stream_download(url, local_path, cancel_event)
+        suffixes = expected_suffixes.get(name.lower()) if expected_suffixes else None
+
+        reuse_existing = False
+        if skip_existing and local_path.exists():
+            if _zip_has_expected_content(local_path, suffixes):
+                status_callback(f"Reutilizando {name} ({index}/{total})...")
+                reuse_existing = True
+            else:
+                status_callback(f"Arquivo local invalido, baixando {name} ({index}/{total})...")
+        else:
+            status_callback(f"Baixando {name} ({index}/{total})...")
+
+        if not reuse_existing:
+            _stream_download(url, local_path, cancel_event)
+
         downloaded.append((name, local_path))
         progress.increment()
     return downloaded
@@ -602,12 +750,17 @@ def _iter_csv_chunks(
 
 def _resolve_csv_member(archive: zipfile.ZipFile, suffixes: Tuple[str, ...]) -> str:
     suffixes_lower = tuple(suffix.lower() for suffix in suffixes)
+    patterns = [
+        re.compile(rf"{re.escape(suffix)}(?:\.[^/\\]+)*$")
+        for suffix in suffixes_lower
+    ]
+
     for member in archive.namelist():
-        if member.lower().endswith(suffixes_lower):
-            return member
+        member_lower = member.lower()
+        for suffix, pattern in zip(suffixes_lower, patterns):
+            if member_lower.endswith(suffix) or pattern.search(member_lower):
+                return member
     raise DatabaseUpdateError("Arquivo CSV esperado nao encontrado no pacote da Receita Federal.")
-
-
 def _extract_reference_date(empresas_paths: Sequence[Path]) -> str:
     for path in empresas_paths:
         try:

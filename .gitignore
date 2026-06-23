@@ -166,3 +166,5 @@ assinar_executavel.txt
 certificate.pfx
 *.exe
 .vscode
+CLAUDE.md
+.claude/

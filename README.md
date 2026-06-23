@@ -1,5 +1,5 @@
 # Casa dos Dados Offline
-![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https://github.com/guilhermecugler/CasaDosDadosOffline&title=View%20Count)
+[![Views](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fguilhermecugler%2FCasaDosDadosOffline&label=Views&icon=eye-fill&color=%230a5dc2)](https://github.com/guilhermecugler/CasaDosDadosOffline)
 
 ![GitHub repo size](https://img.shields.io/github/repo-size/guilhermecugler/Scraper-Casa-dos-Dados?style=for-the-badge)
 ![GitHub language count](https://img.shields.io/github/languages/count/guilhermecugler/Scraper-Casa-dos-Dados?style=for-the-badge)
